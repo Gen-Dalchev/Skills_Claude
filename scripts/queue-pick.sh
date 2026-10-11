@@ -55,9 +55,10 @@ while IFS=$'\t' read -r num labels deps; do
   done
   if [ -n "$wait" ]; then say "- #$num ждёт #$wait"; continue; fi
 
-  # По ветке задачи уже есть PR — задача сдвинута, второй раз не брать.
-  prs=$(gh pr list -R "$REPO" --head "$branch" --state all --json number --jq length)
-  if [ "$prs" != 0 ]; then say "- #$num: по ветке $branch уже есть PR — пропуск"; continue; fi
+  # По ветке задачи есть открытый или слитый PR — задача сдвинута, второй раз не брать.
+  # Закрытый без слияния («не сливать») не держит: владелец снова поставил «готово» — доработка (Ш-95).
+  prs=$(gh pr list -R "$REPO" --head "$branch" --state all --json state --jq '[.[] | select(.state != "CLOSED")] | length')
+  if [ "$prs" != 0 ]; then say "- #$num: по ветке $branch уже есть открытый или слитый PR — пропуск"; continue; fi
 
   over=no
   case ",$labels," in *,$OVER,*) over=yes ;; esac
