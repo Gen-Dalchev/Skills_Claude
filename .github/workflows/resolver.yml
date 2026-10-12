@@ -3,7 +3,8 @@ name: Развязчик (общий)
 # Общий workflow развязчика конвейера «Штаб» (Ш-51, Ш-52): проект вызывает
 # его из своего файла агентов, когда слит PR (событие push действие Claude
 # не принимает). Шаг без Claude ищет открытые PR бота с конфликтом; по
-# каждому, по одному, Claude вливает основную ветку и пушит.
+# каждому, по одному, Claude вливает основную ветку и пушит. Затем — очередь
+# исполнителя (Ш-97): задача «после #N» стартует, когда #N слит.
 # Правка этого файла меняет развязчика во всех проектах сразу.
 
 on:
@@ -30,6 +31,10 @@ on:
       max-turns:
         type: number
         default: 40
+      wake-queue:
+        description: После развязки разбудить очередь исполнителя (Ш-97)
+        type: boolean
+        default: true
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -155,3 +160,31 @@ jobs:
           MODEL: ${{ inputs.model }}/${{ inputs.effort }}
           TURNS: ${{ inputs.max-turns }}
         run: bash "$RUNNER_TEMP/run-summary.sh"
+
+  # Слияние будит очередь (Ш-97): задача, которая ждала слитую («после #N»)
+  # или суточный предел, стартует без новой метки. Работы нет — «Очередь
+  # пуста», без Claude. После развязки — чтобы исполнитель брал main уже с
+  # развязанными PR; сбой развязки очередь не держит. Хвост исполнителя
+  # (executor.yml) зовёт развязчика без очереди: она только что прошла.
+  queue:
+    needs: [find, resolver]
+    if: ${{ !cancelled() && inputs.wake-queue }}
+    # Один исполнитель на репо, как его ни разбудили — меткой или слиянием
+    # (Ш-97): группа «queue» общая с очередью по метке (executor.yml); следующий ждёт, а не отменяет.
+    # Группа — на весь вызов, не на слоты: слот, ждущий группу, отменил бы
+    # ждущий прогон с другого пути.
+    concurrency:
+      group: queue
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    uses: goigolden88/Skills_Claude/.github/workflows/queue.yml@main
+    with:
+      node-version: ${{ inputs.node-version }}
+      chrome: ${{ inputs.chrome }}
+      project-tools: ${{ inputs.project-tools }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

@@ -2,8 +2,8 @@ name: Исполнитель (общий)
 
 # Общий workflow исполнителя конвейера «Штаб» (Ш-33): проект вызывает его
 # коротким файлом по метке «готово» — условия запуска и права задаёт он.
-# Здесь — очередь (Ш-41, Ш-42): метка только будит, задачу каждый слот
-# выбирает сам; подготовка машины, инструкция и запуск Claude Code.
+# Метка только будит очередь (Ш-41, Ш-42): слоты — в queue.yml, их же
+# будит слияние PR через resolver.yml (Ш-97); после очереди — развязчик.
 # Правка этого файла меняет исполнителя во всех проектах сразу.
 
 on:
@@ -40,201 +40,29 @@ on:
 
 jobs:
   executor:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    # Слоты строго по очереди: каждый берёт следующую задачу (Ш-42); их
-    # столько же, сколько прогонов в день на репо (Ш-43). Сбой слота
-    # отменяет остальные — человек смотрит.
-    strategy:
-      max-parallel: 1
-      fail-fast: true
-      matrix:
-        slot: [1, 2, 3, 4, 5]
-    # GH_TOKEN — только своим шагам: в шаге Claude он подменил бы токен
-    # App, и PR от github-actions не запустил бы CI.
-    env:
-      REPO: ${{ github.repository }}
-      OWNER: ${{ github.repository_owner }}
-    steps:
-      # Инструкция и очередь — из этого же репо, той версии, что и workflow.
-      - name: Файлы исполнителя
-        run: |
-          for f in agents/executor.md scripts/queue-pick.sh; do
-            curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/${{ job.workflow_sha }}/$f" -o "$RUNNER_TEMP/${f##*/}" \
-              || curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/main/$f" -o "$RUNNER_TEMP/${f##*/}"
-          done
-
-      # Выбор задачи и лимиты Ш-07 — до Claude, ходов не тратит. Метка модели
-      # (sonnet, opus) — модель; усилия (medium, xhigh) — усилие (Ш-54);
-      # «пара» — прогон пары (Ш-34, Ш-42); «крупная» — большой предел (Ш-46).
-      - name: Очередь
-        id: pick
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_MODEL: ${{ inputs.model }}
-          DEFAULT_EFFORT: ${{ inputs.effort }}
-          DEFAULT_TURNS: ${{ inputs.max-turns }}
-          BIG_TURNS: ${{ inputs.big-turns }}
-        run: bash "$RUNNER_TEMP/queue-pick.sh"
-
-      - if: steps.pick.outputs.issue != ''
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - if: steps.pick.outputs.issue != '' && inputs.node-version != ''
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          # Кеш — только при package-lock.json: в новом репо без него setup-node падает (Magic_Fishki#2).
-          cache: ${{ hashFiles('package-lock.json') != '' && 'npm' || '' }}
-
-      # Ubuntu 24.04 может не пустить Chrome в его песочницу; первый запуск
-      # на чистой машине долгий — прогрев, чтобы прогон не падал не из-за кода.
-      - if: steps.pick.outputs.issue != '' && inputs.chrome
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          timeout 30 google-chrome --headless=new --disable-gpu --dump-dom about:blank > /dev/null 2>&1 || true
-
-      - name: Инструкция исполнителя
-        id: instruction
-        if: steps.pick.outputs.issue != ''
-        run: |
-          {
-            echo 'text<<END_OF_INSTRUCTION'
-            cat "$RUNNER_TEMP/executor.md"
-            echo 'END_OF_INSTRUCTION'
-          } >> "$GITHUB_OUTPUT"
-
-      - if: steps.pick.outputs.issue != ''
-        uses: anthropics/claude-code-action@v1
-        id: claude
-        with:
-          # Токен подписки (claude setup-token); ключ API не заводится (Ш-12, Ш-17).
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Фона нет (Ш-47): без человека фоновая команда умирает через
-          # секунды после последнего ответа агента — прогон кончался без пуша.
-          # Долгая команда теперь упирается в свой таймаут, а не уходит в фон.
-          settings: '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}'
-          prompt: |
-            Репо: ${{ github.repository }}
-            Issue: #${{ steps.pick.outputs.issue }}
-            Владелец: @${{ github.repository_owner }}
-
-            ${{ steps.pick.outputs.pair == 'yes' && 'Прогон пары: да — см. «Прогон пары» в инструкции.' || '' }}
-
-            Ты в GitHub Action: клон с подмодулями готов. Ветку назови
-            ${{ steps.pick.outputs.branch }}. Метку `в-работе` поставил запуск.
-            Метки, комментарии и PR — через gh.
-            Команды разрешены списком: ${{ inputs.project-tools }}, git, gh issue
-            view/edit/comment, gh pr list/view/diff/create, gh label list. Других
-            нет (npx, node, sed, python, вывод в файл через `>`): запуск отклонит,
-            и ход пропадёт; вместо них — скрипты проекта из списка. Запускай по
-            одной за вызов, без `;`, `&&`, `|` и `cd`. Файлы читай и ищи
-            инструментами Read, Grep, Glob, правь — Edit, а не cat, grep, ls, sed.
-
-            ${{ steps.instruction.outputs.text }}
-          # Модель, усилие, ходы — по замерам (Ш-19, Ш-31); проект может задать свои.
-          # Список --allowedTools повторён в промпте выше (ретро 07.10): правишь
-          # один — правь и другой.
-          claude_args: |
-            --model ${{ steps.pick.outputs.model }}
-            --effort ${{ steps.pick.outputs.effort }}
-            --max-turns ${{ steps.pick.outputs.turns }}
-            --allowedTools "Read,Edit,Write,Glob,Grep,${{ inputs.project-tools }},Bash(git:*),Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr create:*),Bash(gh label list:*)"
-            --disallowedTools "Bash(gh pr merge:*),Bash(git push --force:*),Bash(git push -f:*)"
-
-      # Замер прогона (Ш-19, Ш-31): ходы и время — из итога Claude Code, а не
-      # со слов агента; команды, в которых ему отказали, — чтобы править
-      # список разрешённых. Только имя инструмента и начало команды.
-      - name: Замер прогона
-        if: always() && steps.claude.outputs.execution_file != ''
-        run: |
-          jq -r '
-            [.[] | select(.type == "result")] | last |
-            "### Замер прогона",
-            "",
-            "Задача: #${{ steps.pick.outputs.issue }}, слот ${{ matrix.slot }}",
-            "",
-            "Модель: ${{ steps.pick.outputs.model }}/${{ steps.pick.outputs.effort }}",
-            "",
-            "Ходов: \(.num_turns) из ${{ steps.pick.outputs.turns }}, минут: \((.duration_ms / 60000 * 10 | floor) / 10)",
-            "",
-            "Оценка, $: \(.total_cost_usd // "?")",
-            "",
-            "Отказано в правах: \(.permission_denials | length)",
-            (.permission_denials[]? | "- \(.tool_name): \((.tool_input.command // .tool_input.file_path // "") | tostring | .[0:120])")
-          ' "${{ steps.claude.outputs.execution_file }}" | tee -a "$GITHUB_STEP_SUMMARY"
-          # Замер — ещё и аннотацией задания: её отдаёт REST, а логи из облачной
-          # сессии не читаются (ретро 07.10, Ш-68). Одна строка, `%` экранирован.
-          # Последние слова — и здесь: без них ретро не видит, почему прогон
-          # кончился без PR (ретро 08.10).
-          jq -r '
-            ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // "—"
-              | .[0:200] | gsub("[\r\n]+"; " ") | gsub("\\|"; "/")) as $words |
-            [.[] | select(.type == "result")] | last |
-            ["Задача: #${{ steps.pick.outputs.issue }}, слот ${{ matrix.slot }}",
-             "Модель: ${{ steps.pick.outputs.model }}/${{ steps.pick.outputs.effort }}",
-             "Ходов: \(.num_turns) из ${{ steps.pick.outputs.turns }}, минут: \((.duration_ms / 60000 * 10 | floor) / 10)",
-             "Оценка, $: \(.total_cost_usd // "?")",
-             "Отказано в правах: \(.permission_denials | length)",
-             "Последние слова агента: \($words)"]
-            | join(" | ") | gsub("%"; "%25") | "::notice title=Замер прогона::\(.)"
-          ' "${{ steps.claude.outputs.execution_file }}"
-          # Последние слова агента (Ш-47): вывод агента Action прячет, а без
-          # них не видно, почему прогон кончился без PR.
-          jq -r '
-            [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // "—" |
-            "", "Последние слова агента: \(.[0:300] | gsub("\n"; " "))"
-          ' "${{ steps.claude.outputs.execution_file }}" | tee -a "$GITHUB_STEP_SUMMARY"
-          # Событие лимита подписки (Ш-42): статус окна, процента в нём нет.
-          jq -r '
-            [.[] | select(.type == "rate_limit_event") | .rate_limit_info // {} | "\(.rateLimitType // "?"): \(.status // "?")"] | unique |
-            "", "Лимит подписки: \(if length == 0 then "событий нет" else join(", ") end)"
-          ' "${{ steps.claude.outputs.execution_file }}" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      # Сделанное — на GitHub, даже если агент не смог запушить (ретро 08.10:
-      # GitHub 5 минут не принимал запись — ветка из 59 ходов пропала).
-      # Только вперёд, без force; следующий прогон продолжит ветку (шаг 7).
-      - name: Сохранить ветку
-        if: always() && steps.pick.outputs.issue != ''
-        env:
-          BRANCH: ${{ steps.pick.outputs.branch }}
-          BASE: ${{ github.sha }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git rev-parse -q --verify "refs/heads/$BRANCH" > /dev/null || exit 0
-          [ "$(git rev-list --count "$BASE..$BRANCH")" -gt 0 ] || exit 0
-          for i in 1 2 3; do
-            git push -q "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" "refs/heads/$BRANCH:refs/heads/$BRANCH" && exit 0
-            sleep 30
-          done
-          echo "::warning title=Ветка не сохранена::$BRANCH — GitHub не принял пуш"
-
-      # Итог слота (Ш-42): задача, которую прогон не сдвинул, остаётся с
-      # «в-работе»; предупреждение или отказ по лимиту подписки — стоп очереди.
-      # В обоих случаях — комментарий владельцу и сбой слота: следующие
-      # слоты отменяются.
-      - name: Итог слота
-        if: always() && steps.pick.outputs.issue != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE: ${{ steps.pick.outputs.issue }}
-          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          stop=""
-          labels=$(gh issue view "$ISSUE" -R "$REPO" --json labels --jq '[.labels[].name] | join(",")')
-          case ",$labels," in *,в-работе,*) stop="прогон кончился, а задача не сдвинулась — метка «в-работе» осталась" ;; esac
-          status=""
-          if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
-            status=$(jq -r '[.[] | select(.type == "rate_limit_event") | .rate_limit_info.status // empty] | last // ""' "$EXECUTION_FILE")
-          fi
-          case "$status" in allowed_warning|rejected) stop="${stop:+$stop; }лимит подписки близко ($status) — очередь стоит до сброса окна" ;; esac
-          [ -z "$stop" ] && exit 0
-          echo "Стоп очереди: $stop" | tee -a "$GITHUB_STEP_SUMMARY"
-          gh issue comment "$ISSUE" -R "$REPO" --body "Очередь остановлена: $stop. Лог прогона: $RUN_URL. Продолжить — снять \`в-работе\` (и, если нужно, снова поставить \`готово\`). @$OWNER"
-          exit 1
+    # Один исполнитель на репо, как его ни разбудили — меткой или слиянием
+    # (Ш-97): группа «queue» общая с очередью по слиянию (resolver.yml); следующий ждёт, а не отменяет.
+    # Группа — на весь вызов, не на слоты: слот, ждущий группу, отменил бы
+    # ждущий прогон с другого пути.
+    concurrency:
+      group: queue
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    uses: goigolden88/Skills_Claude/.github/workflows/queue.yml@main
+    with:
+      node-version: ${{ inputs.node-version }}
+      chrome: ${{ inputs.chrome }}
+      project-tools: ${{ inputs.project-tools }}
+      model: ${{ inputs.model }}
+      effort: ${{ inputs.effort }}
+      max-turns: ${{ inputs.max-turns }}
+      big-turns: ${{ inputs.big-turns }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
   # После очереди — тот же развязчик, что и по слиянию (Ш-51): PR, открытый
   # после слияния, с которым он конфликтует, иначе никто не развяжет —
@@ -258,5 +86,7 @@ jobs:
       node-version: ${{ inputs.node-version }}
       chrome: ${{ inputs.chrome }}
       project-tools: ${{ inputs.project-tools }}
+      # Очередь только что прошла — второй раз не будить (Ш-97).
+      wake-queue: false
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
