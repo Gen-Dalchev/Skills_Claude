@@ -1,0 +1,53 @@
+name: Приёмник Telegram
+
+# Выкладка Worker'а channels/telegram в Cloudflare: тесты, затем wrangler deploy.
+# Секреты репо: CLOUDFLARE_API_TOKEN (только Workers), CLOUDFLARE_ACCOUNT_ID.
+# Нет секретов — тесты идут, выкладка пропускается. Секреты самого Worker'а
+# (ключ бота, токен GitHub, секрет вебхука, id владельца) — в панели Cloudflare, не здесь.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "channels/telegram/**"
+      - ".github/workflows/telegram.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: channels/telegram
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Тесты
+        run: node --test
+      - name: Ключи Cloudflare
+        id: keys
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Секретов Cloudflare нет — выкладка пропущена"
+          fi
+      - name: Выкладка
+        if: steps.keys.outputs.ok == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: npx --yes wrangler@4.149.0 deploy
