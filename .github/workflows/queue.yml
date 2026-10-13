@@ -115,6 +115,11 @@ jobs:
       - if: steps.pick.outputs.issue != ''
         uses: anthropics/claude-code-action@v1
         id: claude
+        # Предел ходов мягкий (ретро 12.10, Ш-122 Штаба): Claude Code доводит
+        # работу до конца и только потом сравнивает ходы с пределом — шаг
+        # краснел у сделанной задачи с PR и отменял остальные слоты. Сбой
+        # слота теперь решает «Итог слота»: задача не сдвинулась — стоп.
+        continue-on-error: true
         with:
           # Токен подписки (claude setup-token); ключ API не заводится (Ш-12, Ш-17).
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -226,6 +231,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ steps.pick.outputs.issue }}
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           stop=""
@@ -236,6 +242,11 @@ jobs:
             status=$(jq -r '[.[] | select(.type == "rate_limit_event") | .rate_limit_info.status // empty] | last // ""' "$EXECUTION_FILE")
           fi
           case "$status" in allowed_warning|rejected) stop="${stop:+$stop; }лимит подписки близко ($status) — очередь стоит до сброса окна" ;; esac
+          # Шаг Claude упал, а задача сдвинулась (метки сняты) — обычно предел
+          # ходов превышен у сделанной работы: не стоп, а заметка в замере.
+          if [ -z "$stop" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
+            echo "::warning title=Шаг Claude с ошибкой::задача #$ISSUE сдвинулась — очередь идёт дальше; причина — в логе шага (чаще всего предел ходов)"
+          fi
           [ -z "$stop" ] && exit 0
           echo "Стоп очереди: $stop" | tee -a "$GITHUB_STEP_SUMMARY"
           gh issue comment "$ISSUE" -R "$REPO" --body "Очередь остановлена: $stop. Лог прогона: $RUN_URL. Продолжить — снять \`в-работе\` (и, если нужно, снова поставить \`готово\`). @$OWNER"
