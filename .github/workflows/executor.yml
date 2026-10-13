@@ -52,6 +52,8 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    # Владелец — буквально: здесь GitHub выражений не принимает. После форка
+    # заменить на свой (гайд агентов, docs/гайд-агентов.md; Ш-134).
     uses: goigolden88/Skills_Claude/.github/workflows/queue.yml@main
     with:
       node-version: ${{ inputs.node-version }}
@@ -81,6 +83,8 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    # Владелец — буквально: здесь GitHub выражений не принимает. После форка
+    # заменить на свой (гайд агентов, docs/гайд-агентов.md; Ш-134).
     uses: goigolden88/Skills_Claude/.github/workflows/resolver.yml@main
     with:
       node-version: ${{ inputs.node-version }}
