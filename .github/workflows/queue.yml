@@ -243,10 +243,18 @@ jobs:
           labels=$(gh issue view "$ISSUE" -R "$REPO" --json labels --jq '[.labels[].name] | join(",")')
           case ",$labels," in *,в-работе,*) stop="прогон кончился, а задача не сдвинулась — метка «в-работе» осталась" ;; esac
           status=""
+          kind=""
           if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
             status=$(jq -r '[.[] | select(.type == "rate_limit_event") | .rate_limit_info.status // empty] | last // ""' "$EXECUTION_FILE")
+            kind=$(jq -r '[.[] | select(.type == "rate_limit_event") | .rate_limit_info.rateLimitType // empty] | last // ""' "$EXECUTION_FILE")
           fi
-          case "$status" in allowed_warning|rejected) stop="${stop:+$stop; }лимит подписки близко ($status) — очередь стоит до сброса окна" ;; esac
+          # Какой лимит: окно (5 часов) или неделя — иначе «до сброса окна» вводит в заблуждение.
+          case "$kind" in
+            five_hour) reset="до сброса окна (5 часов)" ;;
+            seven_day*) reset="до сброса недельного лимита (это может быть несколько дней)" ;;
+            *) reset="до сброса лимита" ;;
+          esac
+          case "$status" in allowed_warning|rejected) stop="${stop:+$stop; }лимит подписки близко ($status${kind:+, $kind}) — очередь стоит $reset" ;; esac
           # Шаг Claude упал, а задача сдвинулась (метки сняты) — обычно предел
           # ходов превышен у сделанной работы: не стоп, а заметка в замере.
           if [ -z "$stop" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
