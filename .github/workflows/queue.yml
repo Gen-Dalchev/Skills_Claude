@@ -57,11 +57,16 @@ jobs:
       OWNER: ${{ github.repository_owner }}
     steps:
       # Инструкция и очередь — из этого же репо, той версии, что и workflow.
+      # Репо — тот, где лежит workflow (job.workflow_repository): у форка —
+      # форк, не goigolden88 (Ш-134). Запасной путь — его же main, с предупреждением.
       - name: Файлы исполнителя
+        env:
+          SRC: https://raw.githubusercontent.com/${{ job.workflow_repository }}
         run: |
           for f in agents/executor.md scripts/queue-pick.sh; do
-            curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/${{ job.workflow_sha }}/$f" -o "$RUNNER_TEMP/${f##*/}" \
-              || curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/main/$f" -o "$RUNNER_TEMP/${f##*/}"
+            curl -sfL "$SRC/${{ job.workflow_sha }}/$f" -o "$RUNNER_TEMP/${f##*/}" \
+              || { echo "::warning::$f — с main ${{ job.workflow_repository }}: по коммиту workflow не скачался"
+                   curl -sfL "$SRC/main/$f" -o "$RUNNER_TEMP/${f##*/}"; }
           done
 
       # Выбор задачи и лимиты Ш-07 — до Claude, ходов не тратит. Метка модели

@@ -36,11 +36,16 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       # Инструкция и скрипты — из этого же репо, той версии, что и workflow.
+      # Репо — тот, где лежит workflow (job.workflow_repository): у форка —
+      # форк, не goigolden88 (Ш-134). Запасной путь — его же main, с предупреждением.
       - name: Файлы ревьюера
+        env:
+          SRC: https://raw.githubusercontent.com/${{ job.workflow_repository }}
         run: |
           for f in agents/reviewer.md scripts/review.sh scripts/run-summary.sh; do
-            curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/${{ job.workflow_sha }}/$f" -o "$RUNNER_TEMP/${f##*/}" \
-              || curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/main/$f" -o "$RUNNER_TEMP/${f##*/}"
+            curl -sfL "$SRC/${{ job.workflow_sha }}/$f" -o "$RUNNER_TEMP/${f##*/}" \
+              || { echo "::warning::$f — с main ${{ job.workflow_repository }}: по коммиту workflow не скачался"
+                   curl -sfL "$SRC/main/$f" -o "$RUNNER_TEMP/${f##*/}"; }
           done
 
       # PR бота из этого репо, коммит ещё не проверен, CI зелёный — зовём

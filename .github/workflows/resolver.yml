@@ -51,13 +51,17 @@ jobs:
       prs: ${{ steps.find.outputs.prs }}
       count: ${{ steps.find.outputs.count }}
     steps:
+      # Скрипты и инструкция — из репо и коммита этого workflow (у форка —
+      # форк, Ш-134); запасной путь — его же main, с предупреждением.
       - name: PR бота с конфликтом
         id: find
         env:
           GH_TOKEN: ${{ github.token }}
+          SRC: https://raw.githubusercontent.com/${{ job.workflow_repository }}
         run: |
-          curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/${{ job.workflow_sha }}/scripts/resolve.sh" -o "$RUNNER_TEMP/resolve.sh" \
-            || curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/main/scripts/resolve.sh" -o "$RUNNER_TEMP/resolve.sh"
+          curl -sfL "$SRC/${{ job.workflow_sha }}/scripts/resolve.sh" -o "$RUNNER_TEMP/resolve.sh" \
+            || { echo "::warning::scripts/resolve.sh — с main ${{ job.workflow_repository }}: по коммиту workflow не скачался"
+                 curl -sfL "$SRC/main/scripts/resolve.sh" -o "$RUNNER_TEMP/resolve.sh"; }
           bash "$RUNNER_TEMP/resolve.sh" find
 
   resolver:
@@ -78,10 +82,13 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Файлы развязчика
+        env:
+          SRC: https://raw.githubusercontent.com/${{ job.workflow_repository }}
         run: |
           for f in agents/resolver.md scripts/resolve.sh scripts/run-summary.sh; do
-            curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/${{ job.workflow_sha }}/$f" -o "$RUNNER_TEMP/${f##*/}" \
-              || curl -sfL "https://raw.githubusercontent.com/goigolden88/Skills_Claude/main/$f" -o "$RUNNER_TEMP/${f##*/}"
+            curl -sfL "$SRC/${{ job.workflow_sha }}/$f" -o "$RUNNER_TEMP/${f##*/}" \
+              || { echo "::warning::$f — с main ${{ job.workflow_repository }}: по коммиту workflow не скачался"
+                   curl -sfL "$SRC/main/$f" -o "$RUNNER_TEMP/${f##*/}"; }
           done
           echo "START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
@@ -181,6 +188,8 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    # Владелец — буквально: здесь GitHub выражений не принимает. После форка
+    # заменить на свой (гайд агентов, docs/гайд-агентов.md; Ш-134).
     uses: goigolden88/Skills_Claude/.github/workflows/queue.yml@main
     with:
       node-version: ${{ inputs.node-version }}

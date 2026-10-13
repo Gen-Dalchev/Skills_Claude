@@ -36,6 +36,11 @@ while [ $# -gt 0 ]; do
 done
 
 TPL=$(cd "$(dirname "$0")/../templates/project" && pwd)
+# Чьих агентов звать — репо, из клона которого запущен скрипт: у форка
+# Skills_Claude — сам форк (Ш-134). AGENTS_REPO=владелец/репо — задать явно.
+AGENTS=${AGENTS_REPO:-$(git -C "$TPL" remote get-url origin 2>/dev/null \
+  | sed -E 's#\.git$##; s#^.*[/:]([^/:]+/[^/]+)$#\1#')}
+case $AGENTS in */*) ;; *) echo "не понял, чей это клон Skills_Claude: задай AGENTS_REPO=владелец/репо"; exit 1 ;; esac
 BRANCH=pipeline-connect
 dry() { [ "${DRY_RUN:-}" = 1 ]; }
 say() { echo "$*"; }
@@ -45,7 +50,7 @@ info=$(gh api "repos/$REPO") || { say "Нет доступа к $REPO: репо 
 BASE=$(jq -r .default_branch <<<"$info")
 EMPTY=no
 gh api "repos/$REPO/git/ref/heads/$BASE" >/dev/null 2>&1 || EMPTY=yes
-say "## $REPO — основная ветка $BASE$([ $EMPTY = yes ] && echo ', репо пустой')"
+say "## $REPO — основная ветка $BASE, агенты — $AGENTS$([ $EMPTY = yes ] && echo ', репо пустой')"
 # Пустой репо: первой задаче нужен `npm install` — завести зависимости и
 # package-lock.json; без него исполнитель встанет (Magic_Fishki#2).
 TOOLS_SET=${TOOLS_SET:-no}
@@ -89,7 +94,7 @@ exists() { [ $EMPTY = no ] && gh api "repos/$REPO/contents/$1?ref=$BASE" >/dev/n
 
 FILES=()   # путь в репо → файл в $WORK; put_file — только с `< файл` или `< <(…)`: в конвейере FILES теряется
 put_file() { mkdir -p "$WORK/$(dirname "$1")"; cat > "$WORK/$1"; FILES+=("$1"); }
-fill() { sed -e "s|@NODE@|$NODE|g" -e "s|@CHROME@|$CHROME|g" -e "s|@TOOLS@|$TOOLS|g" "$1"; }
+fill() { sed -e "s|@AGENTS@|$AGENTS|g" -e "s|@NODE@|$NODE|g" -e "s|@CHROME@|$CHROME|g" -e "s|@TOOLS@|$TOOLS|g" "$1"; }
 
 say "### Файлы"
 if exists ".github/ISSUE_TEMPLATE/задача.md"; then say "  шаблон «Задача» уже есть"
