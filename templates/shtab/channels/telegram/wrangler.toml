@@ -1,0 +1,12 @@
+# Приёмник Telegram → ящик `входящее` в репо штаба.
+# Выкладка — .github/workflows/telegram.yml по пушу в main.
+# Секреты Worker'а вписывает владелец в панели Cloudflare, здесь их нет:
+# TELEGRAM_TOKEN, GITHUB_TOKEN, WEBHOOK_SECRET, OWNER_ID.
+name = "shtab-telegram"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+[vars]
+REPO = "<ВЛАДЕЛЕЦ>/<РЕПО-ШТАБА>"  # свой логин и репо штаба
+LABEL = "входящее"
