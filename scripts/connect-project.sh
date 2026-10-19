@@ -13,7 +13,10 @@
 # Это настройка GitHub — только с согласия владельца в этот раз.
 #
 # Репо создаёт человек. После скрипта у него остаётся: доступ GitHub App
-# Claude к репо и секрет CLAUDE_CODE_OAUTH_TOKEN — скрипт напечатает.
+# Claude к репо, секрет CLAUDE_CODE_OAUTH_TOKEN и, если в штабе есть Action
+# спецификатора, новый репо в списке его ключа — скрипт напечатает. Сам
+# скрипт этого не делает: нужен ключ с правами администратора, а список
+# репо у ключа GitHub через API не меняет.
 # Только REST (`gh api`): GraphQL облачный прокси не пускает.
 # DRY_RUN=1 — только чтение: показать, что было бы сделано.
 set -euo pipefail
@@ -177,8 +180,9 @@ fi
 # ─── Что осталось человеку ─────────────────────────────────────────────────
 say "### Человеку"
 say "  1. Доступ Claude к репо: github.com/settings/installations → Claude → Repository access → добавить ${REPO#*/}"
-say "  2. Секрет: github.com/$REPO/settings/secrets/actions → CLAUDE_CODE_OAUTH_TOKEN (claude setup-token)"
-[ -n "$PR_URL" ] && say "  3. Слить $PR_URL — после того, как сессия допишет раздел «Для конвейера»"
+say "  2. Секрет: github.com/$REPO/settings/secrets/actions → CLAUDE_CODE_OAUTH_TOKEN (claude setup-token; или скрипт штаба, который кладёт ключ во все проекты)"
+say "  3. Если в штабе работает Action спецификатора: github.com/settings/personal-access-tokens → его ключ → Edit → Repository access → добавить ${REPO#*/} → Update (значение ключа не меняется, секрет штаба не трогать)"
+[ -n "$PR_URL" ] && say "  4. Слить $PR_URL — после того, как сессия допишет раздел «Для конвейера»"
 say "### Сессии Штаба"
 say "  карточка в каталоге Штаба: python3 scripts/projects.py --new ${REPO#*/} --group <группа> (Ш-80)"
 say "  хостам ретро и аналитика репо подключает человек словом в самом хосте (Ш-76)"
