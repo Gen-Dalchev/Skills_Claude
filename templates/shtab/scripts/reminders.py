@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 from datetime import date
+from urllib.parse import quote
 
 REPO = os.environ.get("GITHUB_REPOSITORY") or sys.exit("нужен GITHUB_REPOSITORY=<логин>/<репо штаба>")
 OWNER = REPO.split("/")[0]
@@ -64,7 +65,7 @@ def main():
         for title, body in items:
             print(f"[пробно] {title}\n  {body[:120]}")
         return
-    open_titles = set(json.loads(gh(f"repos/{REPO}/issues?state=open&labels={LABEL}&per_page=100", "--jq", "[.[].title]")))
+    open_titles = set(json.loads(gh(f"repos/{REPO}/issues?state=open&labels={quote(LABEL)}&per_page=100", "--jq", "[.[].title]")))
     for title, body in items:
         if title in open_titles:
             print(f"уже открыта: {title}")
