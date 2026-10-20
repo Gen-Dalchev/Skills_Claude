@@ -34,7 +34,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: @NODE@
-          cache: npm
+          # Кеш — только при package-lock.json: без него setup-node падает (первый PR нового репо).
+          cache: ${{ hashFiles('package-lock.json') != '' && 'npm' || '' }}
 
       # ci, а не install: ставит ровно то, что в package-lock.json.
       - if: steps.has.outputs.app == 'yes'
