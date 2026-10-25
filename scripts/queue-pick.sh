@@ -16,7 +16,11 @@ MAX_ALL_DAY=10   # PR бота за 24 часа во всех репо
 # Метка владельца на задаче: суточные пределы для неё не действуют (Ш-60).
 # Предел открытых PR и стоп по лимиту подписки — действуют всегда.
 OVER=сверх-предела
-LIMIT_MARK='<!-- очередь: лимит -->'
+LIMIT_MARK='<!-- очередь: лимит'  # + вид причины и ' -->'
+# Стоп по лимиту подписки держится между пробуждениями: «Итог слота»
+# (queue.yml) ставит метку на задачу, где пришло «лимит близко», и пишет срок
+# в комментарий; снять метку — продолжить раньше срока.
+STOP=стоп-лимит
 
 out() { echo "$1=$2" >> "${GITHUB_OUTPUT:-/dev/null}"; }
 say() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
@@ -88,25 +92,56 @@ all_open=$((here_open + other_open))
 all_day=$((here_day + other_day))
 say "Открытых PR бота: $all_open из $MAX_OPEN; за сутки: здесь $here_day из $MAX_REPO_DAY, всего $all_day из $MAX_ALL_DAY."
 
-reason=""
-if [ "$all_open" -ge "$MAX_OPEN" ]; then
-  reason="открытых PR бота во всех репо — $all_open, предел $MAX_OPEN. Слейте или закройте PR"
+# Стоп по лимиту подписки: срок — из последнего комментария с меткой срока
+# («до 0» — срок неизвестен, держится до снятия метки). Срок прошёл — метка
+# снимается сама.
+hold=""
+now=$(date -u +%s)
+stops=$(gh issue list -R "$REPO" --state all --label "$STOP" --limit 20 --json number --jq '.[].number')
+for n in $stops; do
+  until=$(gh api --paginate "repos/$REPO/issues/$n/comments?per_page=100" \
+    --jq '.[].body | capture("<!-- очередь: стоп-лимит до (?<t>[0-9]+)") | .t' | tail -n 1)
+  until=${until:-0}
+  if [ "$until" != 0 ] && [ "$now" -ge "$until" ]; then
+    say "Стоп по лимиту на #$n кончился — метка «$STOP» снята."
+    dry || gh issue edit "$n" -R "$REPO" --remove-label "$STOP" > /dev/null
+    continue
+  fi
+  if [ "$until" = 0 ]; then
+    hold="лимит подписки на #$n, срок сброса неизвестен — до снятия метки «$STOP» с #$n"
+  else
+    hold="лимит подписки на #$n — до $(date -u -d "@$until" '+%d.%m %H:%M') UTC; раньше — снимите метку «$STOP» с #$n"
+  fi
+  break
+done
+
+reason="" why=""
+if [ -n "$hold" ]; then
+  reason="$hold" why=подписка
+elif [ "$all_open" -ge "$MAX_OPEN" ]; then
+  why=открытые reason="открытых PR бота во всех репо — $all_open, предел $MAX_OPEN. Слейте или закройте PR"
 elif [ "$over" = yes ] && { [ "$here_day" -ge "$MAX_REPO_DAY" ] || [ "$all_day" -ge "$MAX_ALL_DAY" ]; }; then
   say "Суточный предел достигнут, но на #$issue метка «$OVER» — идёт сверх него."
 elif [ "$here_day" -ge "$MAX_REPO_DAY" ]; then
-  reason="PR бота в этом репо за сутки — $here_day, предел $MAX_REPO_DAY. Подождите до завтра"
+  why=сутки reason="PR бота в этом репо за сутки — $here_day, предел $MAX_REPO_DAY. Подождите до завтра"
 elif [ "$all_day" -ge "$MAX_ALL_DAY" ]; then
-  reason="PR бота во всех репо за сутки — $all_day, предел $MAX_ALL_DAY. Подождите до завтра"
+  why=сутки reason="PR бота во всех репо за сутки — $all_day, предел $MAX_ALL_DAY. Подождите до завтра"
 fi
 
 if [ -n "$reason" ]; then
   say "Лимит: $reason. Задача #$issue ждёт."
   # Один комментарий на задачу, а не по одному на слот.
   last=$(gh api "repos/$REPO/issues/$issue/comments?per_page=100" --jq '.[-1].body // ""')
-  if [[ "$last" != *"$LIMIT_MARK"* ]] && ! dry; then
-    gh issue comment "$issue" -R "$REPO" --body "Очередь стоит: $reason. Задача ждёт: очередь проснётся сама при слиянии PR в этом репо или когда снимете и снова поставите \`готово\` на любую задачу. Не ждать суточного предела — поставьте на задачу метку \`$OVER\`, затем снимите и снова поставьте \`готово\`; предел открытых PR метка не снимает. @$OWNER
+  mark="$LIMIT_MARK:$why -->"
+  if [[ "$last" != *"$mark"* ]] && ! dry; then
+    if [ -n "$hold" ]; then
+      how="Метку \`$OVER\` стоп по лимиту подписки не снимает. После снятия \`$STOP\` очередь проснётся при слиянии PR в этом репо или когда снимете и снова поставите \`готово\` на любую задачу."
+    else
+      how="Очередь проснётся сама при слиянии PR в этом репо или когда снимете и снова поставите \`готово\` на любую задачу. Не ждать суточного предела — поставьте на задачу метку \`$OVER\`, затем снимите и снова поставьте \`готово\`; предел открытых PR метка не снимает."
+    fi
+    gh issue comment "$issue" -R "$REPO" --body "Очередь стоит: $reason. Задача ждёт. $how @$OWNER
 
-$LIMIT_MARK"
+$mark"
   fi
   exit 0
 fi

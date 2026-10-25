@@ -244,9 +244,21 @@ jobs:
           case ",$labels," in *,в-работе,*) stop="прогон кончился, а задача не сдвинулась — метка «в-работе» осталась" ;; esac
           status=""
           kind=""
+          resets=""
           if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
-            status=$(jq -r '[.[] | select(.type == "rate_limit_event") | .rate_limit_info.status // empty] | last // ""' "$EXECUTION_FILE")
-            kind=$(jq -r '[.[] | select(.type == "rate_limit_event") | .rate_limit_info.rateLimitType // empty] | last // ""' "$EXECUTION_FILE")
+            # Статус, тип и срок — из одного события: последнего с «лимит
+            # близко» или отказом, нет такого — последнего вообще (иначе
+            # поздний «allowed» окна прятал бы недельное предупреждение).
+            # Срок сброса — секунды Unix (на случай миллисекунд — делим).
+            read -r status kind resets < <(jq -r '
+              [.[] | select(.type == "rate_limit_event") | .rate_limit_info // {}] as $e
+              | ([$e[] | select(.status == "allowed_warning" or .status == "rejected")] | last) // ($e | last) // {}
+              | [.status // "-", .rateLimitType // "-",
+                 (.resetsAt | numbers | if . > 1e12 then ./1000 else . end | floor | tostring) // "-"]
+              | join(" ")' "$EXECUTION_FILE")
+            [ "$status" = - ] && status=""
+            [ "$kind" = - ] && kind=""
+            [ "$resets" = - ] && resets=""
           fi
           # Какой лимит: окно (5 часов) или неделя — иначе «до сброса окна» вводит в заблуждение.
           case "$kind" in
@@ -254,7 +266,18 @@ jobs:
             seven_day*) reset="до сброса недельного лимита (это может быть несколько дней)" ;;
             *) reset="до сброса лимита" ;;
           esac
-          case "$status" in allowed_warning|rejected) stop="${stop:+$stop; }лимит подписки близко ($status${kind:+, $kind}) — очередь стоит $reset" ;; esac
+          # Стоп по лимиту держится между пробуждениями (queue-pick.sh): метка
+          # «стоп-лимит» на задаче и срок в комментарии. Срок неизвестен: окно —
+          # 5 часов от сейчас, неделя — до снятия метки владельцем («до 0»).
+          limit_stop=""
+          case "$status" in allowed_warning|rejected)
+            limit_stop=yes
+            until=${resets:-0}
+            [ "$until" = 0 ] && [ "$kind" = five_hour ] && until=$(( $(date -u +%s) + 5 * 3600 ))
+            if [ "$until" = 0 ]; then when="до снятия метки \`стоп-лимит\`"
+            else when="до $(date -u -d "@$until" '+%d.%m %H:%M') UTC"; fi
+            stop="${stop:+$stop; }лимит подписки близко ($status${kind:+, $kind}) — очередь стоит $reset, $when" ;;
+          esac
           # Шаг Claude упал, а задача сдвинулась (метки сняты) — обычно предел
           # ходов превышен у сделанной работы: не стоп, а заметка в замере.
           if [ -z "$stop" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
@@ -262,6 +285,22 @@ jobs:
           fi
           [ -z "$stop" ] && exit 0
           echo "Стоп очереди: $stop" | tee -a "$GITHUB_STEP_SUMMARY"
-          gh issue comment "$ISSUE" -R "$REPO" --body "Очередь остановлена: $stop. Лог прогона: $RUN_URL. Продолжить — снять \`в-работе\` (и, если нужно, снова поставить \`готово\`). @$OWNER"
+          how=""
+          case ",$labels," in *,в-работе,*) how="снять \`в-работе\` (и, если нужно, снова поставить \`готово\`)" ;; esac
+          if [ -n "$limit_stop" ]; then
+            gh label create стоп-лимит -R "$REPO" --color B60205 \
+              --description "Очередь стоит по лимиту подписки; снять — продолжить" 2>/dev/null || true
+            wake="затем очередь проснётся при слиянии PR в этом репо или когда снимете и снова поставите \`готово\` на любую задачу"
+            if [ "$until" = 0 ]; then how="${how:+$how; }снять \`стоп-лимит\` с этой задачи, $wake"
+            else how="${how:+$how; }после срока очередь продолжит сама при следующем пробуждении, раньше — снять \`стоп-лимит\` с этой задачи, $wake"; fi
+          fi
+          gh issue comment "$ISSUE" -R "$REPO" --body "Очередь остановлена: $stop. Лог прогона: $RUN_URL. Продолжить — $how. @$OWNER${limit_stop:+
+
+          <!-- очередь: стоп-лимит до $until -->}"
+          # Метка — после комментария: её сбой не должен глушить комментарий.
+          if [ -n "$limit_stop" ]; then
+            gh issue edit "$ISSUE" -R "$REPO" --add-label стоп-лимит > /dev/null \
+              || echo "::warning title=Метка не поставлена::стоп-лимит на #$ISSUE — стоп не удержится между пробуждениями"
+          fi
           exit 1
 
