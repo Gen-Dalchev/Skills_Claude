@@ -5,10 +5,11 @@
 ходы, минуты, PR, вердикт ревьюера, итог, красные проверки, развязчик», а
 перед ней — сигналы для ретро: ошибки первыми. Ниже — PR сессии.
 
-Ходы, отказы в правах и последние слова агента лежат только в логе прогона
-(«Замер прогона»), а логи из облака через REST не отдаются (403). Их кладут в
-папку --logs файлами <репо>-<job_id>.log (в облаке — через GitHub MCP,
-get_job_logs, хвост ~80 строк). Каких не хватает — показывает --need-logs.
+Ходы и число отказов в правах — в аннотации «Замер прогона»; список отказов
+и последние слова агента целиком — только в логе прогона. Логи кладут в папку
+--logs файлами <репо>-<job_id>.log — лог целиком (`gh api repos/…/actions/jobs/
+<job_id>/logs`, иначе GitHub MCP get_job_logs): блок «Замер прогона» стоит
+≈ 90 строк от конца, хвост его не берёт. Каких не хватает — показывает --need-logs.
 Минуты берутся из времени шага Claude и без логов.
 
     python3 scripts/summary.py --since 2026-10-01 --until 2026-10-07
@@ -84,12 +85,25 @@ def minutes(a, b):
 LOG_LINE = re.compile(r"^\S+Z ")  # отметка времени в начале строки лога
 
 
+MEASURE_KEYS = ("Модель: ", "Ходов: ", "Задача: #", "Оценка, $: ", "Отказано в правах: ",
+                "Последние слова агента: ", "Лимит подписки: ", "Стоп очереди: ")
+
+
 def parse_measure(lines):
     """Строки «Замера прогона» → словарь: задача, модель, ходы, предел, отказы."""
     m = {"denials": []}
     in_denials = False
     for raw in lines:
         line = LOG_LINE.sub("", raw.rstrip("\n"))
+        # Список отказов: «- …»; строки без «- », пока список короче числа, —
+        # продолжение многострочной команды (heredoc), а не конец списка.
+        if in_denials and not line.startswith(MEASURE_KEYS):
+            if line.startswith("- "):
+                m["denials"].append(line[2:][:120])
+            elif line.strip() and len(m["denials"]) >= m.get("denials_count", 0):
+                in_denials = False
+            continue
+        in_denials = False
         if line.startswith("Модель: "):
             m["model"] = line[len("Модель: "):].strip()
         elif line.startswith("Ходов: "):
@@ -102,6 +116,8 @@ def parse_measure(lines):
         elif line.startswith("Оценка, $: "):
             m["cost"] = line[len("Оценка, $: "):]
         elif line.startswith("Отказано в правах: "):
+            g = re.match(r"Отказано в правах: (\d+)", line)
+            m["denials_count"] = int(g[1]) if g else 0
             in_denials = True
             continue
         elif line.startswith("Последние слова агента: "):
@@ -110,32 +126,49 @@ def parse_measure(lines):
             m["rate"] = line[len("Лимит подписки: "):]
         elif line.startswith("Стоп очереди: "):
             m["stop"] = line[len("Стоп очереди: "):]
-        if in_denials:
-            if line.startswith("- "):
-                m["denials"].append(line[2:][:120])
-            elif line.strip():
-                in_denials = False
     return m
 
 
 def read_measure(logs_dir, repo, job_id):
-    """«Замер прогона»: аннотация задания (её отдаёт REST), иначе сохранённый
-    лог <репо>-<job_id>.log; None — ни того, ни другого."""
+    """«Замер прогона»: аннотация задания (её отдаёт REST); замер без аннотации
+    и список отказов (в аннотации только их число) — из сохранённого лога
+    <репо>-<job_id>.log; None — ни того, ни другого."""
     try:
         notes = api(f"repos/{OWNER}/{repo}/check-runs/{job_id}/annotations")
     except RuntimeError:
         notes = []
     note = next((a for a in notes if a.get("title") == "Замер прогона"), None)
-    if note:
-        return parse_measure(note["message"].split(" | "))
-    if not logs_dir:
-        return None
+    m = parse_measure(note["message"].split(" | ")) if note else None
+    # В аннотации у отказов только число, список — в логе.
+    if m and not denials_unread(m):
+        return m
+    log = None
     for name in (f"{repo}-{job_id}.log", f"{repo.lower()}-{job_id}.log"):
-        path = os.path.join(logs_dir, name)
-        if os.path.exists(path):
+        path = os.path.join(logs_dir, name) if logs_dir else ""
+        if path and os.path.exists(path):
             with open(path, encoding="utf-8", errors="replace") as f:
-                return parse_measure(f.readlines())
-    return None
+                log = parse_measure(f.readlines())
+            log["log_read"] = True
+            break
+    if not m:
+        return log
+    if log:
+        m["log_read"] = True
+        if log["denials"]:
+            m["denials"] = log["denials"]
+    return m
+
+
+def denials_unread(m):
+    """Сколько отказов замер насчитал, а списком не дал."""
+    return max((m.get("denials_count") or 0) - len(m["denials"]), 0)
+
+
+def denial_list(m):
+    """Отказы замера; непрочитанные — заглушкой, чтобы не пропасть из счёта."""
+    if not m:
+        return []
+    return m["denials"] + [UNREAD] * denials_unread(m)
 
 
 # --- Сбор по репо --------------------------------------------------------------
@@ -360,8 +393,13 @@ def link(repo, n, kind="issues"):
     return f"[{repo}#{n}](https://github.com/{OWNER}/{repo}/{kind}/{n})"
 
 
+UNREAD = "?"
+
+
 def denial_kind(cmd):
     """Вид отказа: первые слова команды, без аргументов."""
+    if cmd == UNREAD:
+        return "вид не прочитан (списка нет в замере)"
     cmd = cmd.replace("Bash: ", "", 1)
     if cmd.startswith("gh pr create"):
         return "gh pr create"
@@ -371,7 +409,7 @@ def denial_kind(cmd):
     if re.search(r"(^|\s)\d?>", bare):
         return "перенаправление вывода (> файл)"
     words = cmd.split()
-    return " ".join(words[:2]) if words else cmd
+    return " ".join(words[:2]).rstrip(":") if words else cmd
 
 
 def is_pair(r, rows):
@@ -380,7 +418,7 @@ def is_pair(r, rows):
 
 def signals(data):
     rows = [r for d in data for r in d["rows"]]
-    groups = {k: [] for k in ("fail", "closed", "review", "ci", "class", "stops", "resolver")}
+    groups = {k: [] for k in ("fail", "closed", "review", "ci", "class", "stops", "limit", "resolver")}
     denials = {}
     for d in data:
         repo = d["repo"]
@@ -402,7 +440,9 @@ def signals(data):
             if m.get("turns") and m.get("limit") and m["turns"] >= m["limit"]:
                 groups["fail"].append(f"- {pr}: упор в предел ходов {m['turns']}/{m['limit']}")
             if m.get("stop"):
-                groups["fail"].append(f"- {pr}: стоп очереди — {m['stop']}")
+                # Стоп только по лимиту у задачи с PR — не сбой (Skills_Claude: слот зелёный).
+                only_limit = "лимит подписки" in m["stop"] and "в-работе" not in m["stop"]
+                groups["limit" if only_limit else "fail"].append(f"- {pr}: стоп очереди — {m['stop']}")
             cls, t = task_class(r["labels"]), m.get("turns")
             if t and ((cls == "простая" and t > 80) or (cls == "обычная" and t >= 100)):
                 groups["class"].append(f"- {pr}: класс «{cls}», ходов {t} (повод проверить признаки класса)")
@@ -413,7 +453,7 @@ def signals(data):
             if r["stops"]:
                 groups["stops"].append(f"- {link(repo, r['issue'])}: `нужно-решение` ({', '.join(r['stops'])})")
         for j in d["jobs"]:
-            for x in ((j["measure"] or {}).get("denials") or []) if j["kind"] == "executor" else []:
+            for x in denial_list(j["measure"]) if j["kind"] == "executor" else []:
                 denials.setdefault(denial_kind(x), []).append(f"{repo}#{j.get('issue') or '?'}")
         for j in d["orphans"]:
             m = j["measure"] or {}
@@ -430,6 +470,7 @@ def signals(data):
     titles = {"fail": "Провалы прогонов", "closed": "Закрыты без слияния",
               "review": "Ревьюер против или молчит", "ci": "Красные «Проверки PR»",
               "class": "Сверка классов", "stops": "Стопы `нужно-решение`",
+              "limit": "Стопы по лимиту подписки (PR открыт — не сбой)",
               "resolver": "Работа развязчика"}
     out = []
     for k, title in titles.items():
@@ -513,7 +554,7 @@ def metrics(data, since, until):
     costs = [float(m["cost"]) for m in ms if (m.get("cost") or "").replace(".", "", 1).isdigit()]
     den = {}
     for m in ms:
-        for x in m.get("denials") or []:
+        for x in denial_list(m):
             k = denial_kind(x)
             den[k] = den.get(k, 0) + 1
     ex = [j for j in jobs if j["kind"] == "executor"]
@@ -684,7 +725,8 @@ def main():
     ap.add_argument("--prev", nargs="+", default=[],
                     help="прошлые отчёты ретро (.md), новый первым — для «Динамики»; обычно четыре")
     ap.add_argument("--need-logs", action="store_true",
-                    help="только перечислить задания Claude, чьих логов нет в --logs")
+                    help="только перечислить задания Claude, чьих логов нет в --logs "
+                         "(нет замера или списка отказов)")
     ap.add_argument("--gh-owner", help="владелец репо на GitHub; иначе SHTAB_OWNER или origin")
     a = ap.parse_args()
     global OWNER
@@ -697,7 +739,8 @@ def main():
     if a.need_logs:
         for d in data:
             for j in d["jobs"]:
-                if j["kind"] == "executor" and not j["measure"]:
+                if j["kind"] == "executor" and (not j["measure"] or (
+                        denials_unread(j["measure"]) and not j["measure"].get("log_read"))):
                     print(f"{d['repo']}\t{j['job_id']}\t{j['step_start'][:16]}")
         return
     prevs = [(os.path.basename(p), read_prev(p)) for p in a.prev]
